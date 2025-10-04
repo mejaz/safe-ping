@@ -106,18 +106,43 @@ export default function Chat() {
   const setupWebRTC = async (isInitiator, sessionId) => {
     setConnectionStatus('connecting');
     
-    const configuration = {
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        // Add TURN server - replace with your actual TURN server credentials
-        {
-          urls: 'turn:your-turn-server.com:3478',
-          username: 'your-username',
-          credential: 'your-password'
-        }
-      ]
-    };
+    // Build ICE servers configuration from environment variables
+    const iceServers = [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' }
+    ];
+
+    // Add TURN server if environment variables are set
+    if (process.env.NEXT_PUBLIC_TURN_SERVER_URL && 
+        process.env.NEXT_PUBLIC_TURN_SERVER_USERNAME && 
+        process.env.NEXT_PUBLIC_TURN_SERVER_CREDENTIAL) {
+      
+      iceServers.push({
+        urls: process.env.NEXT_PUBLIC_TURN_SERVER_URL,
+        username: process.env.NEXT_PUBLIC_TURN_SERVER_USERNAME,
+        credential: process.env.NEXT_PUBLIC_TURN_SERVER_CREDENTIAL
+      });
+      
+      console.log('TURN server configured');
+    } else {
+      console.log('No TURN server configured, using STUN only');
+    }
+
+    // Add secondary TURN server if configured
+    if (process.env.NEXT_PUBLIC_TURN_SERVER_URL_2 && 
+        process.env.NEXT_PUBLIC_TURN_SERVER_USERNAME_2 && 
+        process.env.NEXT_PUBLIC_TURN_SERVER_CREDENTIAL_2) {
+      
+      iceServers.push({
+        urls: process.env.NEXT_PUBLIC_TURN_SERVER_URL_2,
+        username: process.env.NEXT_PUBLIC_TURN_SERVER_USERNAME_2,
+        credential: process.env.NEXT_PUBLIC_TURN_SERVER_CREDENTIAL_2
+      });
+      
+      console.log('Secondary TURN server configured');
+    }
+
+    const configuration = { iceServers };
 
     const pc = new RTCPeerConnection(configuration);
     setConnection(pc);

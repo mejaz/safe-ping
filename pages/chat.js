@@ -109,7 +109,13 @@ export default function Chat() {
     const configuration = {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' }
+        { urls: 'stun:stun1.l.google.com:19302' },
+        // Add TURN server - replace with your actual TURN server credentials
+        {
+          urls: 'turn:your-turn-server.com:3478',
+          username: 'your-username',
+          credential: 'your-password'
+        }
       ]
     };
 
@@ -132,22 +138,183 @@ export default function Chat() {
 
     pc.oniceconnectionstatechange = () => {
       setConnectionStatus(pc.iceConnectionState);
-      if (pc.iceConnectionState === 'connected') {
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
         setStep('chat');
       }
     };
 
-    if (isInitiator) {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      console.log('Created offer, waiting for answer...');
-    }
-
-    pc.onicecandidate = (event) => {
+    // Handle ICE candidates - send to signaling server
+    pc.onicecandidate = async (event) => {
       if (event.candidate) {
-        console.log('ICE candidate:', event.candidate);
+        console.log('Sending ICE candidate:', event.candidate);
+        try {
+          await fetch('/api/signal', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sessionId,
+              type: 'ice-candidate',
+              data: {
+                candidate: event.candidate,
+                from: isInitiator ? 'initiator' : 'joiner'
+              }
+            })
+          });
+        } catch (error) {
+          console.error('Error sending ICE candidate:', error);
+        }
       }
     };
+
+    if (isInitiator) {
+      // Create and send offer
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      
+      try {
+        await fetch('/api/signal', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId,
+            type: 'offer',
+            data: offer
+          })
+        });
+        console.log('Offer sent to signaling server');
+        
+        // Wait for answer
+        waitForAnswer(pc, sessionId);
+      } catch (error) {
+        console.error('Error sending offer:', error);
+      }
+    } else {
+      // Wait for offer, then create answer
+      waitForOffer(pc, sessionId);
+    }
+
+    // Start listening for ICE candidates
+    listenForICECandidates(pc, sessionId, isInitiator);
+  };
+
+  const waitForOffer = async (pc, sessionId) => {
+    const checkForOffer = async () => {
+      try {
+        const response = await fetch(`/api/signal?sessionId=${sessionId}&type=offer`);
+        if (response.ok) {
+          const { data: offer } = await response.json();
+          if (offer) {
+            console.log('Received offer:', offer);
+            await pc.setRemoteDescription(new RTCSessionDescription(offer));
+            
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            
+            // Send answer back
+            await fetch('/api/signal', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                sessionId,
+                type: 'answer',
+                data: answer
+              })
+            });
+            
+            console.log('Answer sent to signaling server');
+            return true;
+          }
+        }
+      } catch (error) {
+        console.error('Error checking for offer:', error);
+      }
+      return false;
+    };
+
+    // Poll for offer
+    const interval = setInterval(async () => {
+      if (await checkForOffer()) {
+        clearInterval(interval);
+      }
+    }, 1000);
+
+    // Cleanup after 30 seconds
+    setTimeout(() => clearInterval(interval), 30000);
+  };
+
+  const waitForAnswer = async (pc, sessionId) => {
+    const checkForAnswer = async () => {
+      try {
+        const response = await fetch(`/api/signal?sessionId=${sessionId}&type=answer`);
+        if (response.ok) {
+          const { data: answer } = await response.json();
+          if (answer) {
+            console.log('Received answer:', answer);
+            await pc.setRemoteDescription(new RTCSessionDescription(answer));
+            return true;
+          }
+        }
+      } catch (error) {
+        console.error('Error checking for answer:', error);
+      }
+      return false;
+    };
+
+    // Poll for answer
+    const interval = setInterval(async () => {
+      if (await checkForAnswer()) {
+        clearInterval(interval);
+      }
+    }, 1000);
+
+    // Cleanup after 30 seconds
+    setTimeout(() => clearInterval(interval), 30000);
+  };
+
+  const listenForICECandidates = (pc, sessionId, isInitiator) => {
+    const processedCandidates = new Set();
+    
+    const checkForCandidates = async () => {
+      try {
+        const response = await fetch(`/api/signal?sessionId=${sessionId}&type=ice-candidates`);
+        if (response.ok) {
+          const { data: candidates } = await response.json();
+          
+          for (const candidateData of candidates) {
+            const candidateId = `${candidateData.timestamp}_${candidateData.from}`;
+            
+            // Only process candidates from the other peer that we haven't seen before
+            if (candidateData.from !== (isInitiator ? 'initiator' : 'joiner') && 
+                !processedCandidates.has(candidateId)) {
+              
+              processedCandidates.add(candidateId);
+              
+              try {
+                await pc.addIceCandidate(new RTCIceCandidate(candidateData.candidate));
+                console.log('Added ICE candidate from other peer');
+              } catch (error) {
+                console.error('Error adding ICE candidate:', error);
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Error checking for ICE candidates:', error);
+      }
+    };
+
+    // Poll for ICE candidates
+    const interval = setInterval(checkForCandidates, 1000);
+
+    // Cleanup after connection is established or 60 seconds
+    setTimeout(() => clearInterval(interval), 60000);
+    
+    // Also cleanup when connection state changes
+    pc.addEventListener('iceconnectionstatechange', () => {
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        clearInterval(interval);
+      }
+    });
   };
 
   const setupDataChannel = (channel) => {
